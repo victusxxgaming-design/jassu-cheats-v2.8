@@ -92,10 +92,8 @@ function Checkout() {
         total: Math.max(0, subtotal - discount + fee),
         outcome,
       });
-      if (outcome === "success") {
-        clear();
-        nav({ to: "/order/$id", params: { id: orderNumber }, search: { state: "success" } });
-      } else if (outcome === "pending") {
+      if (outcome !== "failed") {
+        // Payment is confirmed by an admin, never by the browser.
         clear();
         nav({ to: "/order/$id", params: { id: orderNumber }, search: { state: "pending" } });
       } else {
