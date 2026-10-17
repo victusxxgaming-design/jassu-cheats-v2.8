@@ -123,13 +123,17 @@ function mapOrder(r: any): MyOrder {
 
 // ---------- products ----------
 
+// Download links are private (see get_download_url), so list safe columns only.
+const PRODUCT_COLS =
+  "id, slug, name, tagline, description, price, platform, version, stock, hue, rating, sales, features, image_url, published, created_at";
+
 export const productsQuery = queryOptions({
   queryKey: ["products"],
   queryFn: async (): Promise<DbProduct[]> => {
-    const { data: prows, error } = await supabase.from("products").select("*").order("created_at");
+    const { data: prows, error } = await supabase.from("products").select(PRODUCT_COLS).order("created_at");
     if (error) throw error;
     const { data: vrows } = await supabase.from("product_versions").select("*").order("released_at", { ascending: false });
-    return (prows ?? []).map((p) => mapProduct(p, (vrows ?? []).filter((v) => v.product_id === p.id)));
+    return (prows ?? []).map((p) => mapProduct({ ...p, download_url: null }, (vrows ?? []).filter((v) => v.product_id === p.id)));
   },
 });
 
@@ -139,11 +143,11 @@ export const productQuery = (slug: string) =>
   queryOptions({
     queryKey: ["product", slug],
     queryFn: async (): Promise<DbProduct | null> => {
-      const { data: p, error } = await supabase.from("products").select("*").eq("slug", slug).maybeSingle();
+      const { data: p, error } = await supabase.from("products").select(PRODUCT_COLS).eq("slug", slug).maybeSingle();
       if (error) throw error;
       if (!p) return null;
       const { data: vrows } = await supabase.from("product_versions").select("*").eq("product_id", p.id).order("released_at", { ascending: false });
-      return mapProduct(p, vrows ?? []);
+      return mapProduct({ ...p, download_url: null }, vrows ?? []);
     },
   });
 
@@ -188,39 +192,21 @@ export type CheckoutInput = {
   outcome: "success" | "pending" | "failed";
 };
 
+// Totals, identity and payment status are decided by the database
+// (place_order); browser-supplied amounts are ignored. Orders start pending
+// until an admin verifies payment.
 export async function createOrder(input: CheckoutInput): Promise<string> {
-  const orderNumber = `VX-${Math.floor(10000 + Math.random() * 90000)}`;
-  const { data: order, error } = await supabase
-    .from("orders")
-    .insert({
-      order_number: orderNumber,
-      user_id: input.userId,
-      email: input.email,
-      full_name: input.fullName,
-      country: input.country,
-      discord: input.discord || null,
-      subtotal: input.subtotal,
-      discount: input.discount,
-      fee: input.fee,
-      total: input.total,
-      coupon_code: input.couponCode,
-      payment_method: input.method,
-      payment_status: input.outcome === "success" ? "pending" : input.outcome === "pending" ? "pending" : "failed",
-    })
-    .select("id")
-    .single();
+  if (input.outcome === "failed") throw new Error("Payment failed");
+  const { data, error } = await supabase.rpc("place_order", {
+    p_product_ids: input.items.map((p) => p.id),
+    p_coupon: input.couponCode,
+    p_full_name: input.fullName,
+    p_country: input.country,
+    p_discord: input.discord,
+    p_method: input.method,
+  });
   if (error) throw error;
-
-  const { error: itemsError } = await supabase.from("order_items").insert(
-    input.items.map((p) => ({ order_id: order.id, product_id: p.id, price: p.price })),
-  );
-  if (itemsError) throw itemsError;
-
-  if (input.outcome === "success") {
-    const { error: rpcError } = await supabase.rpc("complete_order", { p_order_id: order.id });
-    if (rpcError) throw rpcError;
-  }
-  return orderNumber;
+  return data as string;
 }
 
 // ---------- admin ----------
@@ -362,17 +348,15 @@ export async function saveSettings(s: StoreSettings) {
   if (error) throw error;
 }
 
-export async function validateCoupon(code: string): Promise<Coupon | null> {
-  const { data, error } = await supabase
-    .from("coupons")
-    .select("*")
-    .eq("code", code.toUpperCase())
-    .eq("active", true)
-    .maybeSingle();
+export async function validateCoupon(code: string): Promise<{ code: string; percent_off: number } | null> {
+  const { data, error } = await supabase.rpc("check_coupon", { p_code: code });
   if (error) throw error;
-  if (!data) return null;
-  const c = data as Coupon;
-  if (c.expires_at && new Date(c.expires_at) < new Date()) return null;
-  if (c.max_uses !== null && c.uses >= c.max_uses) return null;
-  return c;
+  const rows = (data ?? []) as { code: string; percent_off: number }[];
+  return rows[0] ?? null;
+}
+
+export async function getDownloadUrl(productId: string): Promise<string | null> {
+  const { data, error } = await supabase.rpc("get_download_url", { p_product_id: productId });
+  if (error) throw error;
+  return (data as string | null) ?? null;
 }
